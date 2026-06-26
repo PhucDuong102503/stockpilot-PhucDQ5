@@ -59,4 +59,6 @@ stockpilot_db.lock.db
 # Generated output files (invoices, reports)
 output/
 
+# Project documentation and plans
 explain/
+plan/
