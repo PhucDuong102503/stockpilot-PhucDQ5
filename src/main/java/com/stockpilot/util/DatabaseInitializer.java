@@ -36,19 +36,35 @@ public class DatabaseInitializer {
     }
 
     private static void executeSchema(String fullSql) {
-        // Split on ";" to get individual statements, skip empty/comment-only ones
+        // Split on ";" to get individual statements
         String[] statements = fullSql.split(";");
         try (Connection conn = DatabaseConnection.getConnection();
              Statement stmt = conn.createStatement()) {
             for (String sql : statements) {
-                String trimmed = sql.trim();
-                if (!trimmed.isEmpty() && !trimmed.startsWith("--")) {
-                    stmt.execute(trimmed);
+                // Strip comment lines (lines starting with --) from the statement
+                String cleaned = stripComments(sql).trim();
+                if (!cleaned.isEmpty()) {
+                    stmt.execute(cleaned);
                 }
             }
             System.out.println("[DatabaseInitializer] Schema initialized successfully.");
         } catch (SQLException e) {
             throw new DataAccessException("Failed to execute schema.sql", e);
         }
+    }
+
+    /**
+     * Removes lines that start with "--" (SQL single-line comments)
+     * while preserving the actual SQL content.
+     */
+    private static String stripComments(String sql) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : sql.split("\\n")) {
+            String trimmedLine = line.trim();
+            if (!trimmedLine.startsWith("--")) {
+                sb.append(line).append("\n");
+            }
+        }
+        return sb.toString();
     }
 }

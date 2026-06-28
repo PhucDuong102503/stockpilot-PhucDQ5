@@ -8,10 +8,27 @@ import com.stockpilot.model.Product;
 import com.stockpilot.repository.CustomerRepository;
 import com.stockpilot.repository.ProductRepository;
 import com.stockpilot.service.CustomerService;
+import com.stockpilot.model.Order;
+import com.stockpilot.repository.OrderRepository;
+import com.stockpilot.service.OrderService;
 import com.stockpilot.service.ProductService;
+import com.stockpilot.service.discount.BulkDiscount;
+import com.stockpilot.service.discount.DiscountPolicy;
+import com.stockpilot.service.discount.NoDiscount;
+import com.stockpilot.service.discount.PercentageDiscount;
+import com.stockpilot.io.CSVImporter;
+import com.stockpilot.io.InvoiceExporter;
+import com.stockpilot.service.ReportService;
 import com.stockpilot.util.DatabaseInitializer;
+import java.io.IOException;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.Map;
 import java.util.List;
 import java.util.Scanner;
 
@@ -24,6 +41,10 @@ public class Main {
     private static final Scanner scanner = new Scanner(System.in);
     private static ProductService productService;
     private static CustomerService customerService;
+    private static OrderService orderService;
+    private static ReportService reportService;
+    private static CSVImporter csvImporter;
+    private static InvoiceExporter invoiceExporter;
 
     public static void main(String[] args) {
         System.out.println("=== StockPilot — Inventory & Order Management System ===");
@@ -37,8 +58,16 @@ public class Main {
         }
 
         // 2. Wire up repositories and services
-        productService  = new ProductService(new ProductRepository());
-        customerService = new CustomerService(new CustomerRepository());
+        ProductRepository productRepo = new ProductRepository();
+        CustomerRepository customerRepo = new CustomerRepository();
+        OrderRepository orderRepo = new OrderRepository(productRepo);
+        
+        productService  = new ProductService(productRepo);
+        customerService = new CustomerService(customerRepo);
+        orderService = new OrderService(orderRepo, productRepo, customerRepo, new NoDiscount());
+        reportService = new ReportService(orderRepo, productRepo);
+        csvImporter = new CSVImporter(productService);
+        invoiceExporter = new InvoiceExporter();
 
         // 3. Main menu loop
         boolean running = true;
@@ -48,6 +77,8 @@ public class Main {
             switch (choice) {
                 case "1" -> productMenu();
                 case "2" -> customerMenu();
+                case "3" -> orderMenu();
+                case "4" -> reportMenu();
                 case "0" -> {
                     System.out.println("Goodbye!");
                     running = false;
@@ -66,6 +97,8 @@ public class Main {
         System.out.println("╠══════════════════════════╣");
         System.out.println("║  1. Product Management   ║");
         System.out.println("║  2. Customer Management  ║");
+        System.out.println("║  3. Order & Cart         ║");
+        System.out.println("║  4. Reports & Analytics  ║");
         System.out.println("║  0. Exit                 ║");
         System.out.println("╚══════════════════════════╝");
         System.out.print("Choose: ");
@@ -84,6 +117,7 @@ public class Main {
             System.out.println("  5. Delete product");
             System.out.println("  6. Adjust stock quantity");
             System.out.println("  7. Low-stock report");
+            System.out.println("  8. Import products from CSV");
             System.out.println("  0. Back to main menu");
             System.out.print("Choose: ");
             String choice = scanner.nextLine().trim();
@@ -97,6 +131,7 @@ public class Main {
                     case "5" -> deleteProduct();
                     case "6" -> adjustStock();
                     case "7" -> lowStockReport();
+                    case "8" -> importProductsCsv();
                     case "0" -> back = true;
                     default  -> System.out.println("[!] Invalid option.");
                 }
@@ -203,6 +238,17 @@ public class Main {
         }
     }
 
+    private static void importProductsCsv() {
+        System.out.print("Enter CSV file path (e.g. products.csv): ");
+        String filePath = scanner.nextLine().trim();
+        try {
+            int imported = csvImporter.importProducts(filePath);
+            System.out.println("[OK] Successfully imported " + imported + " products.");
+        } catch (IOException e) {
+            System.out.println("[Error] Failed to read file: " + e.getMessage());
+        }
+    }
+
     // ─── Customer Management ──────────────────────────────────────────────────
 
     private static void customerMenu() {
@@ -297,5 +343,204 @@ public class Main {
         long id = Long.parseLong(scanner.nextLine().trim());
         boolean deleted = customerService.deleteCustomer(id);
         System.out.println(deleted ? "[OK] Customer deleted." : "[!] Customer not found.");
+    }
+
+    // ─── Order & Cart Management ──────────────────────────────────────────────
+
+    private static void orderMenu() {
+        boolean back = false;
+        while (!back) {
+            System.out.println("\n--- Order & Cart Management ---");
+            System.out.println("  1. View Cart");
+            System.out.println("  2. Add item to Cart");
+            System.out.println("  3. Remove item from Cart");
+            System.out.println("  4. Clear Cart");
+            System.out.println("  5. Checkout");
+            System.out.println("  6. Change Discount Policy");
+            System.out.println("  0. Back to main menu");
+            System.out.print("Choose: ");
+            String choice = scanner.nextLine().trim();
+
+            try {
+                switch (choice) {
+                    case "1" -> viewCart();
+                    case "2" -> addToCart();
+                    case "3" -> removeFromCart();
+                    case "4" -> { orderService.clearCart(); System.out.println("[OK] Cart cleared."); }
+                    case "5" -> checkout();
+                    case "6" -> changeDiscountPolicy();
+                    case "0" -> back = true;
+                    default  -> System.out.println("[!] Invalid option.");
+                }
+            } catch (Exception e) { // Catch all business/validation/db errors in one go here
+                System.out.println("[Error] " + e.getMessage());
+            }
+        }
+    }
+
+    private static void viewCart() {
+        Map<String, Integer> cart = orderService.getCart();
+        if (cart.isEmpty()) {
+            System.out.println("Cart is empty.");
+            return;
+        }
+        System.out.println("--- Current Cart ---");
+        cart.forEach((sku, qty) -> System.out.printf("  %s x %d%n", sku, qty));
+    }
+
+    private static void addToCart() {
+        System.out.print("Enter Product SKU: ");
+        String sku = scanner.nextLine().trim();
+        System.out.print("Enter quantity: ");
+        int qty = Integer.parseInt(scanner.nextLine().trim());
+        orderService.addToCart(sku, qty);
+        System.out.println("[OK] Added to cart.");
+    }
+
+    private static void removeFromCart() {
+        System.out.print("Enter Product SKU to remove: ");
+        String sku = scanner.nextLine().trim();
+        orderService.removeFromCart(sku);
+        System.out.println("[OK] Removed from cart.");
+    }
+
+    private static void checkout() {
+        System.out.print("Enter Customer ID for checkout: ");
+        long customerId = Long.parseLong(scanner.nextLine().trim());
+        Order order = orderService.checkout(customerId);
+        System.out.println("[OK] Checkout successful! Order ID: " + order.getId());
+        System.out.println("Total Paid: $" + order.getTotalAmount());
+        System.out.println("Discount Applied: $" + order.getDiscountAmount());
+        try {
+            String path = invoiceExporter.exportInvoice(order);
+            System.out.println("[OK] Invoice exported to: " + path);
+        } catch (IOException e) {
+            System.out.println("[Warning] Failed to export invoice: " + e.getMessage());
+        }
+    }
+
+    private static void changeDiscountPolicy() {
+        System.out.println("Select Discount Policy:");
+        System.out.println("  1. No Discount");
+        System.out.println("  2. Percentage (e.g. 10%)");
+        System.out.println("  3. Bulk ($100 off over $1000)");
+        System.out.print("Choose: ");
+        String p = scanner.nextLine().trim();
+        DiscountPolicy policy;
+        switch (p) {
+            case "1" -> policy = new NoDiscount();
+            case "2" -> policy = new PercentageDiscount(10.0);
+            case "3" -> policy = new BulkDiscount(new BigDecimal("1000"), new BigDecimal("100"));
+            default -> {
+                System.out.println("[!] Invalid choice, keeping current policy.");
+                return;
+            }
+        }
+        orderService.setDiscountPolicy(policy);
+        System.out.println("[OK] Discount policy updated to " + policy.getClass().getSimpleName());
+    }
+
+    // ─── Reports & Analytics ──────────────────────────────────────────────────
+
+    private static void reportMenu() {
+        boolean back = false;
+        while (!back) {
+            System.out.println("\n--- Reports & Analytics ---");
+            System.out.println("  1. Revenue and Order Count by Period");
+            System.out.println("  2. Top-N Best Selling Products");
+            System.out.println("  3. Revenue by Product Category");
+            System.out.println("  4. Low-Stock Products (Stream Filter)");
+            System.out.println("  0. Back to main menu");
+            System.out.print("Choose: ");
+            String choice = scanner.nextLine().trim();
+
+            try {
+                switch (choice) {
+                    case "1" -> showRevenueReport();
+                    case "2" -> showTopSellingReport();
+                    case "3" -> showCategoryRevenueReport();
+                    case "4" -> showStreamLowStockReport();
+                    case "0" -> back = true;
+                    default  -> System.out.println("[!] Invalid option.");
+                }
+            } catch (Exception e) {
+                System.out.println("[Error] " + e.getMessage());
+            }
+        }
+    }
+
+    private static void showRevenueReport() {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        System.out.print("Enter start date (yyyy-MM-dd, e.g. 2026-01-01): ");
+        String startStr = scanner.nextLine().trim();
+        System.out.print("Enter end date (yyyy-MM-dd, e.g. 2026-12-31): ");
+        String endStr = scanner.nextLine().trim();
+
+        try {
+            LocalDateTime start = LocalDate.parse(startStr, formatter).atStartOfDay();
+            LocalDateTime end = LocalDate.parse(endStr, formatter).atTime(LocalTime.MAX);
+
+            Map<String, Object> report = reportService.getRevenueAndOrderCount(start, end);
+            System.out.println("\n=== Revenue Report ===");
+            System.out.println("Period: " + startStr + " to " + endStr);
+            System.out.println("Total Orders: " + report.get("orderCount"));
+            System.out.println("Total Revenue: $" + report.get("totalRevenue"));
+        } catch (DateTimeParseException e) {
+            System.out.println("[Error] Invalid date format. Please use yyyy-MM-dd.");
+        }
+    }
+
+    private static void showTopSellingReport() {
+        System.out.print("Enter N (number of top products to display): ");
+        int n = Integer.parseInt(scanner.nextLine().trim());
+        List<Map.Entry<Product, Integer>> topProducts = reportService.getTopSellingProducts(n);
+
+        if (topProducts.isEmpty()) {
+            System.out.println("No products sold yet.");
+            return;
+        }
+
+        System.out.println("\n=== Top " + n + " Best-Selling Products ===");
+        System.out.println(" Rank | SKU       | Name                     | Quantity Sold");
+        System.out.println("------|-----------|--------------------------|---------------");
+        int rank = 1;
+        for (Map.Entry<Product, Integer> entry : topProducts) {
+            Product p = entry.getKey();
+            System.out.printf(" %-4d | %-9s | %-24s | %d%n",
+                    rank++, p.getSku(), p.getName(), entry.getValue());
+        }
+    }
+
+    private static void showCategoryRevenueReport() {
+        Map<String, BigDecimal> categoryRevenue = reportService.getRevenueByCategory();
+        if (categoryRevenue.isEmpty() || categoryRevenue.values().stream().allMatch(v -> v == null)) {
+            System.out.println("No revenue generated yet.");
+            return;
+        }
+
+        System.out.println("\n=== Revenue by Product Category ===");
+        System.out.println(" Category    | Total Revenue");
+        System.out.println("-------------|----------------");
+        categoryRevenue.forEach((category, revenue) -> {
+            BigDecimal rev = revenue != null ? revenue : BigDecimal.ZERO;
+            System.out.printf(" %-11s | $%s%n", category, rev);
+        });
+    }
+
+    private static void showStreamLowStockReport() {
+        System.out.print("Enter low-stock threshold: ");
+        int threshold = Integer.parseInt(scanner.nextLine().trim());
+        List<Product> lowStock = reportService.getLowStockProducts(threshold);
+
+        if (lowStock.isEmpty()) {
+            System.out.println("No products below threshold " + threshold + ".");
+            return;
+        }
+
+        System.out.println("\n=== Low-Stock Products (Filtered via Stream API) ===");
+        System.out.println(" SKU       | Name                     | Category    | Current Stock");
+        System.out.println("-----------|--------------------------|-------------|---------------");
+        lowStock.forEach(p -> System.out.printf(" %-9s | %-24s | %-11s | %d%n",
+                p.getSku(), p.getName(), p.getCategory(), p.getStockQuantity()));
     }
 }
