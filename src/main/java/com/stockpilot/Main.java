@@ -20,6 +20,8 @@ import com.stockpilot.io.CSVImporter;
 import com.stockpilot.io.InvoiceExporter;
 import com.stockpilot.service.ReportService;
 import com.stockpilot.util.DatabaseInitializer;
+import com.stockpilot.concurrent.FlashSaleSimulator;
+import com.stockpilot.concurrent.SnapshotScheduler;
 import java.io.IOException;
 
 import java.math.BigDecimal;
@@ -45,6 +47,8 @@ public class Main {
     private static ReportService reportService;
     private static CSVImporter csvImporter;
     private static InvoiceExporter invoiceExporter;
+    private static FlashSaleSimulator flashSaleSimulator;
+    private static SnapshotScheduler snapshotScheduler;
 
     public static void main(String[] args) {
         System.out.println("=== StockPilot — Inventory & Order Management System ===");
@@ -68,6 +72,11 @@ public class Main {
         reportService = new ReportService(orderRepo, productRepo);
         csvImporter = new CSVImporter(productService);
         invoiceExporter = new InvoiceExporter();
+        flashSaleSimulator = new FlashSaleSimulator(orderService, productService, customerService);
+        snapshotScheduler = new SnapshotScheduler(reportService);
+        
+        // Start background snapshots writing every 10 seconds for demo / testing
+        snapshotScheduler.start(10);
 
         // 3. Main menu loop
         boolean running = true;
@@ -79,7 +88,9 @@ public class Main {
                 case "2" -> customerMenu();
                 case "3" -> orderMenu();
                 case "4" -> reportMenu();
+                case "5" -> runFlashSaleSimulation();
                 case "0" -> {
+                    snapshotScheduler.stop();
                     System.out.println("Goodbye!");
                     running = false;
                 }
@@ -99,6 +110,7 @@ public class Main {
         System.out.println("║  2. Customer Management  ║");
         System.out.println("║  3. Order & Cart         ║");
         System.out.println("║  4. Reports & Analytics  ║");
+        System.out.println("║  5. Flash Sale Simulator ║");
         System.out.println("║  0. Exit                 ║");
         System.out.println("╚══════════════════════════╝");
         System.out.print("Choose: ");
@@ -542,5 +554,27 @@ public class Main {
         System.out.println("-----------|--------------------------|-------------|---------------");
         lowStock.forEach(p -> System.out.printf(" %-9s | %-24s | %-11s | %d%n",
                 p.getSku(), p.getName(), p.getCategory(), p.getStockQuantity()));
+    }
+
+    private static void runFlashSaleSimulation() {
+        System.out.print("Enter product SKU for Flash Sale (e.g. LAP-1234): ");
+        String sku = scanner.nextLine().trim();
+        System.out.print("Enter total concurrent buyers (e.g. 50): ");
+        int buyers = Integer.parseInt(scanner.nextLine().trim());
+        System.out.print("Enter quantity per buyer (e.g. 1): ");
+        int qty = Integer.parseInt(scanner.nextLine().trim());
+        
+        System.out.println("Choose Concurrency Mode:");
+        System.out.println("  1. Unsafe mode (Demonstrates Race Conditions / Over-selling)");
+        System.out.println("  2. Thread-Safe mode (Uses ReentrantLock to prevent Race Conditions)");
+        System.out.print("Choose: ");
+        String mode = scanner.nextLine().trim();
+        boolean threadSafe = mode.equals("2");
+
+        try {
+            flashSaleSimulator.runSimulation(sku, buyers, qty, threadSafe);
+        } catch (Exception e) {
+            System.out.println("[Error] Simulation failed: " + e.getMessage());
+        }
     }
 }

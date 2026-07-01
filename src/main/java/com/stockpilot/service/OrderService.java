@@ -16,6 +16,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Service for handling orders and the shopping cart.
@@ -26,6 +27,9 @@ public class OrderService {
     private final ProductRepository productRepository;
     private final CustomerRepository customerRepository;
     private DiscountPolicy discountPolicy;
+
+    // Lock for thread-safe operations
+    private final ReentrantLock checkoutLock = new ReentrantLock();
 
     // The cart maps SKU -> Quantity
     private final Map<String, Integer> cart = new HashMap<>();
@@ -123,5 +127,57 @@ public class OrderService {
         Order savedOrder = orderRepository.save(order);
         clearCart();
         return savedOrder;
+    }
+
+    /**
+     * Direct checkout for a single product (UNSAFE).
+     * Demonstrates race condition when multiple threads read & modify stock concurrently.
+     */
+    public Order directCheckoutUnsafe(Long customerId, String sku, int quantity) {
+        Customer customer = customerRepository.findById(customerId)
+                .orElseThrow(() -> new ProductNotFoundException("Customer not found with id: " + customerId));
+
+        Product product = productRepository.findBySku(sku)
+                .orElseThrow(() -> new ProductNotFoundException("Product not found with SKU: " + sku));
+
+        if (product.getStockQuantity() < quantity) {
+            throw new InsufficientStockException("Insufficient stock for " + sku);
+        }
+
+        // Artificial delay to widen the race condition window
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        Order order = new Order();
+        order.setCustomer(customer);
+        order.setOrderDate(LocalDateTime.now());
+
+        OrderItem item = new OrderItem(null, null, product, quantity, product.getPrice());
+        order.addItem(item);
+
+        BigDecimal subtotal = product.getPrice().multiply(BigDecimal.valueOf(quantity));
+        BigDecimal discount = discountPolicy.calculateDiscount(subtotal);
+        BigDecimal total = subtotal.subtract(discount);
+
+        order.setDiscountAmount(discount);
+        order.setTotalAmount(total);
+
+        return orderRepository.save(order);
+    }
+
+    /**
+     * Direct checkout for a single product (THREAD-SAFE).
+     * Uses Java ReentrantLock to serialize purchase execution.
+     */
+    public Order directCheckoutThreadSafe(Long customerId, String sku, int quantity) {
+        checkoutLock.lock();
+        try {
+            return directCheckoutUnsafe(customerId, sku, quantity);
+        } finally {
+            checkoutLock.unlock();
+        }
     }
 }
